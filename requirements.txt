@@ -1,0 +1,23 @@
+# Core scientific stack
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
+scikit-learn==1.5.0
+pyarrow==16.1.0
+openpyxl==3.1.2
+jupytext==1.16.2
+xgboost==2.0.3
+catboost==1.2.3
+
+# Deep-learning
+torch==2.3.0
+torchvision==0.18.0
+torchaudio==2.3.0
+
+# Optimisation / tracking
+optuna==3.6.1
+
+# Misc
+matplotlib==3.9.0
+tqdm==4.66.4
+
