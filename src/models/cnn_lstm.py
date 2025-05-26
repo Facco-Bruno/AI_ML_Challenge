@@ -9,6 +9,8 @@ __all__ = ["CNNBiLSTM", "WindowTensorDataset", "train_cnn_bilstm"]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+print('Código carregado: CNN + BiLSTM com camada convolucional extra, pooling e early‑stop hook')
+
 class CNNBiLSTM(nn.Module):
     def __init__(self, in_channels: int = 63, n_classes: int = 3):
         super().__init__()

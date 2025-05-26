@@ -1,14 +1,12 @@
 # === file: src/train.py ===
 """
-LOSO cross-validation trainer for:
-    Random-Forest · XGBoost · LightGBM · CNN · Transformer
-
-Key points
-──────────
-• Classical models use hand-crafted features.
-• Deep models use raw 200×63 tensors with z-score + augmentation.
-• Metrics of each fold are written to  JSON files under ./model_results/.
-• Checkpoints:  .pkl for scikit/XGB/LGBM  ·  .pt for PyTorch.
+LOSO cross-validation trainer
+─────────────────────────────
+Model choices:
+  rf | xgb | lgbm | cnn | msgru | transformer
+Outputs:
+  • JSON de métricas  →  ./model_results/<out>
+  • Checkpoints       →  ./checkpoints/<model>_subX.(pkl|pt)
 """
 
 from __future__ import annotations
@@ -16,139 +14,127 @@ import argparse, json, random, joblib
 from pathlib import Path
 from collections import defaultdict
 
-import numpy as np
-import torch
-
-from .config import SEED, CHECKPOINT_DIR
-from .data_utils import window_generator
-from .features import extract_feature_matrix
-from .metrics import compute_metrics
-from .models import (
+import numpy as np, torch
+from src.config        import SEED, CHECKPOINT_DIR
+from src.data_utils    import window_generator
+from src.features      import extract_feature_matrix
+from src.metrics       import compute_metrics
+from src.models import (
     RandomForestFallDetector,
     WindowTensorDataset,
     train_cnn_bilstm,
-    train_sensor_transformer,
+    train_mscnn_gru,
+    train_sensor_transformer,     # <- Transformer trainer
     train_xgboost,
     train_lightgbm,
 )
 
-# -------------------- reproducibility --------------------
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+# reproducibilidade
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 
-# -------------------- paths ------------------------------
-MODEL_RESULTS_DIR = Path("model_results")
-MODEL_RESULTS_DIR.mkdir(exist_ok=True)
+RESULT_DIR = Path("model_results"); RESULT_DIR.mkdir(exist_ok=True)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
-# -------------------- helper functions ------------------
+# ───────────────────────── helpers ─────────────────────────
 def _split_by_subject():
-    groups = defaultdict(list)
+    g = defaultdict(list)
     for subj, win, lbl in window_generator():
-        groups[subj].append((win, lbl))
-    return groups
+        g[subj].append((win, lbl))
+    return g
 
 
 def _save(model, path: Path):
-    """Save .pt for PyTorch models, .pkl for scikit/XGB/LGBM."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if hasattr(model, "state_dict"):
+    if hasattr(model, "state_dict"):          # PyTorch
         torch.save(model.state_dict(), path.with_suffix(".pt"))
-    else:
+    else:                                     # sklearn / xgb / lgbm
         joblib.dump(model, path.with_suffix(".pkl"))
 
 
-def _build_ds(train_p, val_p, test_p):
-    ws_tr, ys_tr = zip(*train_p)
-    tmp = WindowTensorDataset(ws_tr, ys_tr)  # computes mean/std
-    mean, std = tmp.mean, tmp.std
-    tr = WindowTensorDataset(ws_tr, ys_tr, mean, std, augment=True)
-    vl = WindowTensorDataset(*zip(*val_p), mean, std)
-    te = WindowTensorDataset(*zip(*test_p), mean, std)
+def _build_ds(tr_p, vl_p, te_p):
+    ws_tr, ys_tr = zip(*tr_p)
+    tmp = WindowTensorDataset(ws_tr, ys_tr)   # calc mean/std
+    m, s = tmp.mean, tmp.std
+    tr = WindowTensorDataset(ws_tr, ys_tr, m, s, augment=True)
+    vl = WindowTensorDataset(*zip(*vl_p), m, s)
+    te = WindowTensorDataset(*zip(*te_p), m, s)
     return tr, vl, te
 
 
-# -------------------- fold runner -----------------------
-def _run_fold(name: str, tr_p, vl_p, te_p, epochs: int):
-    """Return (model, y_true, y_pred)."""
-
-    # --- classical -------------------------------------------------
-    if name in ("rf", "xgb", "lgbm"):
+# ───────────────────── fold runner ────────────────────────
+def _run_fold(model_name, tr_p, vl_p, te_p, epochs):
+    # classical models -------------------------------------
+    if model_name in ("rf", "xgb", "lgbm"):
         X_tr, y_tr = extract_feature_matrix(tr_p)
         X_vl, y_vl = extract_feature_matrix(vl_p)
         X_te, y_te = extract_feature_matrix(te_p)
 
-        if name == "rf":
+        if model_name == "rf":
             model = RandomForestFallDetector().fit(X_tr, y_tr)
-        elif name == "xgb":
+        elif model_name == "xgb":
             model = train_xgboost(X_tr, y_tr, X_vl, y_vl)
         else:
             model = train_lightgbm(X_tr, y_tr, X_vl, y_vl)
 
         y_pred = model.predict(X_te)
-        if y_pred.ndim > 1:  # LightGBM returns (N, 3)
+        if y_pred.ndim > 1:                    # LGBM proba → class idx
             y_pred = y_pred.argmax(1)
         return model, y_te, y_pred
 
-    # --- deep ------------------------------------------------------
+    # deep models ------------------------------------------
     tr_ds, vl_ds, te_ds = _build_ds(tr_p, vl_p, te_p)
-    model = (
-        train_cnn_bilstm(tr_ds, vl_ds, epochs)
-        if name == "cnn"
-        else train_sensor_transformer(tr_ds, vl_ds, epochs)
-    )
+    if model_name == "cnn":
+        model = train_cnn_bilstm(tr_ds, vl_ds, epochs)
+    elif model_name == "msgru":
+        model = train_mscnn_gru(tr_ds, vl_ds, epochs)
+    else:                                       # transformer
+        model = train_sensor_transformer(tr_ds, vl_ds, epochs)
 
     loader = torch.utils.data.DataLoader(te_ds, batch_size=128)
-    model.eval()
-    preds, gts = [], []
+    model.eval(); preds, gts = [], []
     dev = next(model.parameters()).device
     with torch.no_grad():
         for X, y in loader:
             preds += model(X.to(dev)).argmax(1).cpu().tolist()
-            gts += y.tolist()
+            gts   += y.tolist()
     return model, gts, preds
 
 
-# ------------------------- main ---------------------------
+# ─────────────────────────── main ─────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--model",
-        choices=["rf", "xgb", "lgbm", "cnn", "transformer"],
-        default="transformer",
-    )
+    ap.add_argument("--model",
+                    choices=["rf","xgb","lgbm","cnn","msgru","transformer"],
+                    default="transformer")
     ap.add_argument("--epochs", type=int, default=60,
-                    help="epochs for CNN / Transformer")
+                    help="epochs for CNN/MSGRU/Transformer")
     ap.add_argument("--out", default="results.json",
                     help="filename inside ./model_results/")
     ap.add_argument("--ckpt_dir", default=str(CHECKPOINT_DIR))
     args = ap.parse_args()
 
-    groups = _split_by_subject()
+    groups = _split_by_subject(); res = {}
     subjects = sorted(groups)
-    results = {}
 
     for i, test_sub in enumerate(subjects):
-        val_sub = subjects[(i + 1) % len(subjects)]
-        train_subs = [s for s in subjects if s not in (test_sub, val_sub)]
+        val_sub   = subjects[(i+1) % len(subjects)]
+        train_sub = [s for s in subjects if s not in (test_sub, val_sub)]
 
-        tr_p = [p for s in train_subs for p in groups[s]]
-        vl_p = groups[val_sub]
-        te_p = groups[test_sub]
+        tr_p = [p for s in train_sub for p in groups[s]]
+        vl_p, te_p = groups[val_sub], groups[test_sub]
 
-        print(f"\nFold {i+1}/{len(subjects)}  test={test_sub}  val={val_sub}")
+        print(f"Fold {i+1}/{len(subjects)}  test={test_sub}  val={val_sub}")
         mdl, y_true, y_pred = _run_fold(args.model, tr_p, vl_p, te_p, args.epochs)
         metrics = compute_metrics(y_true, y_pred)
-        results[test_sub] = metrics
+        res[test_sub] = metrics
         print(metrics)
 
         _save(mdl, Path(args.ckpt_dir) / f"{args.model}_{test_sub}")
 
-    out_path = MODEL_RESULTS_DIR / args.out
-    out_path.write_text(json.dumps(results, indent=2))
-    print(f"\n✓ Saved metrics to {out_path}")
-
+    out_path = RESULT_DIR / args.out
+    out_path.write_text(json.dumps(res, indent=2))
+    print(f"✓ Metrics saved to {out_path}")
 
 if __name__ == "__main__":
     main()
+

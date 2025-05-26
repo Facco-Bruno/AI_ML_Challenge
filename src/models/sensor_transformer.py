@@ -8,6 +8,8 @@ __all__ = ["SensorTransformer", "train_sensor_transformer"]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+print('Código carregado: Sensor Transformer com codificação posicional e focal loss')
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d, max_len=512):
         super().__init__()
