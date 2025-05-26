@@ -6,38 +6,59 @@ from sklearn.metrics import f1_score
 
 __all__ = ["SensorTransformer", "train_sensor_transformer"]
 
+# Select device: use GPU if available, else CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print('Código carregado: Sensor Transformer com codificação posicional e focal loss')
 
 class PositionalEncoding(nn.Module):
+    """
+    Implements sinusoidal positional encoding for transformer input.
+    Adds position information to each input vector.
+    """
     def __init__(self, d, max_len=512):
         super().__init__()
         pe = torch.zeros(max_len, d)
         pos = torch.arange(max_len).unsqueeze(1)
         div = torch.exp(torch.arange(0, d, 2)*-(math.log(10000.0)/d))
-        pe[:,0::2] = torch.sin(pos*div); pe[:,1::2] = torch.cos(pos*div)
-        self.register_buffer("pe", pe.unsqueeze(0))
+        pe[:,0::2] = torch.sin(pos*div)  # Even indices: sine
+        pe[:,1::2] = torch.cos(pos*div)  # Odd indices: cosine
+        self.register_buffer("pe", pe.unsqueeze(0))  # Register as buffer (not a parameter)
     def forward(self,x):
+        # Add positional encoding to input tensor
         return x + self.pe[:,:x.size(1)]
 
 class SensorTransformer(nn.Module):
+    """
+    Transformer-based model for sensor data classification.
+    - Projects input to d_model dimension
+    - Adds a learnable [CLS] token
+    - Applies positional encoding
+    - Passes through transformer encoder layers
+    - Uses the [CLS] token for classification
+    """
     def __init__(self, C=63, d_model=256, layers=4, nhead=8, classes=3):
         super().__init__()
-        self.proj = nn.Linear(C, d_model)
-        self.cls  = nn.Parameter(torch.zeros(1,1,d_model))
+        self.proj = nn.Linear(C, d_model)  # Project input features to d_model
+        self.cls  = nn.Parameter(torch.zeros(1,1,d_model))  # Learnable [CLS] token
         self.pos  = PositionalEncoding(d_model)
         enc_layer = nn.TransformerEncoderLayer(d_model, nhead, 4*d_model, batch_first=True)
         self.enc  = nn.TransformerEncoder(enc_layer, layers)
-        self.head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, classes))
+        self.head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, classes))  # Classification head
     def forward(self,x):
         B=x.size(0)
-        x=self.proj(x); x=torch.cat([self.cls.repeat(B,1,1),x],1)
-        x=self.pos(x); x=self.enc(x)
-        return self.head(x[:,0])
+        x=self.proj(x)  # Project input
+        x=torch.cat([self.cls.repeat(B,1,1),x],1)  # Add [CLS] token
+        x=self.pos(x)   # Add positional encoding
+        x=self.enc(x)   # Transformer encoder
+        return self.head(x[:,0])  # Use [CLS] token for output
 
-# Focal loss implementation
+# Focal loss implementation for handling class imbalance
 class FocalLoss(nn.Module):
+    """
+    Focal loss for multi-class classification.
+    Reduces the relative loss for well-classified examples, focusing on hard examples.
+    """
     def __init__(self, alpha=None, gamma=2):
         super().__init__(); self.alpha=alpha; self.gamma=gamma
     def forward(self, logits, y):
@@ -46,27 +67,41 @@ class FocalLoss(nn.Module):
         return ((1-pt)**self.gamma * ce).mean()
 
 def train_sensor_transformer(train_ds, val_ds, epochs=60, bs=64, lr=5e-4, patience=10):
+    """
+    Train the SensorTransformer model with early stopping.
+    - Uses FocalLoss for class imbalance
+    - AdamW optimizer and cosine annealing scheduler
+    - Tracks best model by macro F1 score on validation set
+    - Stops early if no improvement for 'patience' epochs
+    Returns the best model.
+    """
     net=SensorTransformer().to(device)
-    crit=FocalLoss(alpha=torch.tensor([0.3,0.3,0.4],device=device))
-    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-2)
-    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
-    tr=DataLoader(train_ds,bs,shuffle=True); va=DataLoader(val_ds,bs)
-    best,best_f1,wait=None,0,0
+    crit=FocalLoss(alpha=torch.tensor([0.3,0.3,0.4],device=device))  # Class weights for FocalLoss
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-2)  # AdamW optimizer
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)  # Learning rate scheduler
+    tr=DataLoader(train_ds,bs,shuffle=True); va=DataLoader(val_ds,bs)  # DataLoaders for train/val
+    best,best_f1,wait=None,0,0  # Track best model, best F1, and patience counter
     for ep in range(1,epochs+1):
         net.train()
         for X,y in tqdm(tr,desc=f"Ep{ep}"):
-            opt.zero_grad(); loss=crit(net(X.to(device)), y.to(device)); loss.backward(); opt.step()
+            opt.zero_grad()
+            loss=crit(net(X.to(device)), y.to(device))
+            loss.backward()
+            opt.step()
         sch.step()
-        # val
+        # Validation phase
         net.eval(); preds,gts=[],[]
         with torch.no_grad():
             for X,y in va:
-                preds+=net(X.to(device)).argmax(1).cpu().tolist(); gts+=y.tolist()
+                preds+=net(X.to(device)).argmax(1).cpu().tolist()
+                gts+=y.tolist()
         f1=f1_score(gts,preds,average="macro")
         print(f"Epoch{ep}: F1={f1:.3f}")
-        if f1>best_f1: best,best_f1,wait=net.state_dict(),f1,0
-        else: wait+=1
+        if f1>best_f1:
+            best,best_f1,wait=net.state_dict(),f1,0  # Save best model
+        else:
+            wait+=1
         if wait>=patience:
-            print("Early stop"); break
-    net.load_state_dict(best)
+            print("Early stop"); break  # Early stopping
+    net.load_state_dict(best)  # Load best model weights
     return net

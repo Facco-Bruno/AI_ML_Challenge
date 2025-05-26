@@ -29,7 +29,7 @@ from src.models import (
     train_lightgbm,
 )
 
-# reproducibilidade
+# Set random seeds for reproducibility
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 
 RESULT_DIR = Path("model_results"); RESULT_DIR.mkdir(exist_ok=True)
@@ -37,6 +37,10 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 # ───────────────────────── helpers ─────────────────────────
 def _split_by_subject():
+    """
+    Groups all windows by subject.
+    Returns a dict: subject -> list of (window, label) tuples.
+    """
     g = defaultdict(list)
     for subj, win, lbl in window_generator():
         g[subj].append((win, lbl))
@@ -44,6 +48,10 @@ def _split_by_subject():
 
 
 def _save(model, path: Path):
+    """
+    Saves the model checkpoint to disk.
+    Uses .pt for PyTorch models and .pkl for sklearn/xgb/lgbm.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if hasattr(model, "state_dict"):          # PyTorch
         torch.save(model.state_dict(), path.with_suffix(".pt"))
@@ -52,6 +60,10 @@ def _save(model, path: Path):
 
 
 def _build_ds(tr_p, vl_p, te_p):
+    """
+    Builds normalized WindowTensorDataset objects for train, val, and test splits.
+    Uses training set mean/std for normalization.
+    """
     ws_tr, ys_tr = zip(*tr_p)
     tmp = WindowTensorDataset(ws_tr, ys_tr)   # calc mean/std
     m, s = tmp.mean, tmp.std
@@ -63,6 +75,11 @@ def _build_ds(tr_p, vl_p, te_p):
 
 # ───────────────────── fold runner ────────────────────────
 def _run_fold(model_name, tr_p, vl_p, te_p, epochs):
+    """
+    Runs a single LOSO fold for the selected model.
+    Trains on tr_p, validates on vl_p, tests on te_p.
+    Returns the trained model, true labels, and predictions.
+    """
     # classical models -------------------------------------
     if model_name in ("rf", "xgb", "lgbm"):
         X_tr, y_tr = extract_feature_matrix(tr_p)
@@ -102,6 +119,10 @@ def _run_fold(model_name, tr_p, vl_p, te_p, epochs):
 
 # ─────────────────────────── main ─────────────────────────
 def main():
+    """
+    Main entry point for LOSO cross-validation training.
+    Parses arguments, runs folds, saves metrics and checkpoints.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--model",
                     choices=["rf","xgb","lgbm","cnn","msgru","transformer"],

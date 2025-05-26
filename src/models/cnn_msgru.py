@@ -14,6 +14,10 @@ print('Código carregado: Multi-Scale CNN + Squeeze-Excitation + Bi-GRU + Attent
 
 # ───────────────────── components ──────────────────────────
 class SE1D(nn.Module):
+    """
+    Squeeze-and-Excitation block for 1D convolutional outputs.
+    Learns channel-wise attention to recalibrate feature maps.
+    """
     def __init__(self, channels: int, r: int = 16):
         super().__init__()
         self.fc = nn.Sequential(
@@ -24,22 +28,35 @@ class SE1D(nn.Module):
         )
 
     def forward(self, x):
+        # x: (B, C, T)
+        # Global average pooling over time dimension, then channel recalibration
         w = self.fc(GAP(x, 1).squeeze(-1)).unsqueeze(-1)
         return x * w
 
-
 class AttentionPool(nn.Module):
+    """
+    Attention pooling layer.
+    Learns a query vector to compute attention weights over the time dimension.
+    """
     def __init__(self, d: int):
         super().__init__()
         self.q = nn.Parameter(torch.randn(d))
 
     def forward(self, x):  # x (B,T,D)
+        # Compute attention weights and apply to sequence
         a = torch.softmax((x * self.q).sum(-1), 1).unsqueeze(-1)
         return (a * x).sum(1)
 
-
 # ───────────────────── network ─────────────────────────────
 class MSCNN_GRU(nn.Module):
+    """
+    Multi-Scale CNN + Squeeze-Excitation + Bi-GRU + Attention pooling network.
+    - Extracts features with multi-scale convolutions
+    - Applies Squeeze-and-Excitation for channel attention
+    - Processes sequence with bidirectional GRU
+    - Aggregates sequence with attention pooling
+    - Outputs class logits
+    """
     def __init__(self, c_in: int = 63, n_cls: int = 3):
         super().__init__()
         self.conv = nn.Sequential(
@@ -52,15 +69,24 @@ class MSCNN_GRU(nn.Module):
         self.pool = AttentionPool(256)
         self.fc   = nn.Sequential(nn.Dropout(0.4), nn.Linear(256, n_cls))
 
-    def forward(self, x):               # (B,T,C)
+    def forward(self, x):               # x: (B,T,C)
+        # Apply convolutions and SE block
         x = self.conv(x.permute(0,2,1)) # (B,128,T)
         x = x.permute(0,2,1)            # (B,T,128)
+        # Bi-GRU over sequence
         out,_ = self.gru(x)
+        # Attention pooling and final classification
         return self.fc(self.pool(out))
-
 
 # ───────────────────── trainer ─────────────────────────────
 def train_mscnn_gru(train_ds, val_ds, epochs=60, bs=64, lr=3e-4):
+    """
+    Train the MSCNN_GRU model with early stopping.
+    - Uses AdamW optimizer and cosine annealing scheduler
+    - Tracks best model by macro F1 score on validation set
+    - Stops early if no improvement for 10 epochs
+    Returns the best model.
+    """
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = MSCNN_GRU().to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr)

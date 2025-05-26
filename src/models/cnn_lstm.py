@@ -7,11 +7,18 @@ from tqdm import tqdm
 
 __all__ = ["CNNBiLSTM", "WindowTensorDataset", "train_cnn_bilstm"]
 
+# Select device: use GPU if available, else CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print('Código carregado: CNN + BiLSTM com camada convolucional extra, pooling e early‑stop hook')
 
 class CNNBiLSTM(nn.Module):
+    """
+    CNN + BiLSTM model for sequence classification.
+    - Three convolutional layers with batch normalization and pooling
+    - Bidirectional LSTM for temporal modeling
+    - Dropout and linear layer for classification
+    """
     def __init__(self, in_channels: int = 63, n_classes: int = 3):
         super().__init__()
         self.conv = nn.Sequential(
@@ -23,16 +30,23 @@ class CNNBiLSTM(nn.Module):
         self.rnn = nn.LSTM(256, 256, batch_first=True, bidirectional=True)
         self.classifier = nn.Sequential(nn.Dropout(0.4), nn.Linear(512, n_classes))
     def forward(self, x):  # x (B, T, C)
+        # Apply convolutions and pooling
         x = self.conv(x.permute(0,2,1))            # (B, 256, T/2)
-        x = x.permute(0,2,1)
+        x = x.permute(0,2,1)                       # (B, T/2, 256)
+        # BiLSTM over sequence
         _, (h, _) = self.rnn(x)
-        h = torch.cat([h[0], h[1]], dim=1)
+        h = torch.cat([h[0], h[1]], dim=1)         # Concatenate hidden states from both directions
         return self.classifier(h)
 
 # ───────────────────────────────────────────────────────────────
 # Dataset with normalisation + augmentation
 # ───────────────────────────────────────────────────────────────
 class WindowTensorDataset(Dataset):
+    """
+    Dataset for windowed sensor data.
+    - Normalizes each window using mean and std
+    - Optionally applies augmentation (jitter and scaling) to ADL class
+    """
     def __init__(self, windows, labels, mean=None, std=None, augment=False):
         X = np.stack(windows).astype(np.float32)   # (N, T, C)
         self.mean = mean if mean is not None else X.mean(axis=(0,1), keepdims=True)
@@ -58,6 +72,13 @@ class WindowTensorDataset(Dataset):
 from sklearn.metrics import f1_score
 
 def train_cnn_bilstm(train_ds, val_ds, epochs=60, batch_size=64, lr=1e-3, patience=10):
+    """
+    Train the CNNBiLSTM model with early stopping.
+    - Uses AdamW optimizer and cross-entropy loss
+    - Tracks best model by macro F1 score on validation set
+    - Stops early if no improvement for 'patience' epochs
+    Returns the best model.
+    """
     net = CNNBiLSTM().to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-2)
     crit = nn.CrossEntropyLoss()
